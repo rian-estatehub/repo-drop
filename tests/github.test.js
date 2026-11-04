@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { createClient, resolveBase, resolveTiming, previewPath, previewUrl, waitForPages, pool, uploadProject, DEFAULT_BASE } from '../lib/github.js';
+import { createClient, resolveBase, resolveTiming, livePath, liveUrl, waitForPages, pool, uploadProject, DEFAULT_BASE } from '../lib/github.js';
 
 const reply = (status, data, headers = {}) => ({
   ok: status >= 200 && status < 300,
@@ -29,24 +29,27 @@ describe('resolveBase', () => {
 });
 
 describe('resolveTiming', () => {
-  test('reads pollMs, timeoutMs and holdMs on localhost only', () => {
-    assert.deepEqual(resolveTiming({ hostname: 'localhost', search: '?pollMs=40&timeoutMs=900&holdMs=60' }), { pollMs: 40, timeoutMs: 900, holdMs: 60 });
+  test('reads pollMs and timeoutMs on localhost only', () => {
+    assert.deepEqual(resolveTiming({ hostname: 'localhost', search: '?pollMs=40&timeoutMs=900&holdMs=60' }), { pollMs: 40, timeoutMs: 900 });
     assert.deepEqual(resolveTiming({ hostname: 'repo-drop.vercel.app', search: '?pollMs=40' }), {});
     assert.deepEqual(resolveTiming({ hostname: '127.0.0.1', search: '?pollMs=-1&timeoutMs=x' }), {});
   });
 });
 
-describe('preview', () => {
+describe('live address', () => {
   test('index.html at the root wins, else the shortest html path, else none', () => {
-    assert.equal(previewPath(['a/index.html', 'index.html', 'x.html']), 'index.html');
-    assert.equal(previewPath(['docs/deep/page.html', 'about.html', 'z/a.html']), 'z/a.html');
-    assert.equal(previewPath(['b.html', 'a.html']), 'a.html');
-    assert.equal(previewPath(['style.css', 'app.js']), null);
-    assert.equal(previewPath([]), null);
+    assert.equal(livePath(['a/index.html', 'index.html', 'x.html']), 'index.html');
+    assert.equal(livePath(['docs/deep/page.html', 'about.html', 'z/a.html']), 'z/a.html');
+    assert.equal(livePath(['b.html', 'a.html']), 'a.html');
+    assert.equal(livePath(['whatever.html']), 'whatever.html');
+    assert.equal(livePath(['style.css', 'app.js']), null);
+    assert.equal(livePath([]), null);
   });
-  test('previewUrl builds the githack address from the commit sha', () => {
-    assert.equal(previewUrl('u', 'r', 'abc123', 'index.html'), 'https://rawcdn.githack.com/u/r/abc123/index.html');
-    assert.equal(previewUrl('u', 'r', 'abc123', 'my docs/a b.html'), 'https://rawcdn.githack.com/u/r/abc123/my%20docs/a%20b.html');
+  test('liveUrl is the Pages root for index.html or no html, else the root plus the encoded path', () => {
+    assert.equal(liveUrl('https://u.github.io/r/', 'index.html'), 'https://u.github.io/r/');
+    assert.equal(liveUrl('https://u.github.io/r', null), 'https://u.github.io/r/');
+    assert.equal(liveUrl('https://u.github.io/r/', 'whatever.html'), 'https://u.github.io/r/whatever.html');
+    assert.equal(liveUrl('https://u.github.io/r/', 'my docs/a b.html'), 'https://u.github.io/r/my%20docs/a%20b.html');
   });
 });
 
@@ -162,14 +165,14 @@ describe('pool and pages polling', () => {
       onTick: (t) => ticks.push(t)
     });
     assert.equal(out, 'built');
-    assert.deepEqual(ticks, [3000, 6000, 9000]);
+    assert.deepEqual(ticks, [2000, 4000, 6000]);
   });
 
   test('waitForPages gives up at 10 minutes', async () => {
     let polls = 0;
     const out = await waitForPages({ latestBuild: async () => (polls += 1, { status: 'building' }) }, 'o', 'r', { sleep: async () => {} });
     assert.equal(out, 'timeout');
-    assert.equal(polls, 200);
+    assert.equal(polls, 300);
   });
 
   test('waitForPages reports queued, building, then built from the Actions run', async () => {
@@ -229,26 +232,37 @@ describe('uploadProject', () => {
     assert.equal(out.pagesUrl, 'https://u.github.io/x/');
   });
 
-  test('onPreview fires right after the ref and before pages, with the commit sha and html path', async () => {
+  test('onRepoReady fires after the ref and before pages, onPagesOn after pages is enabled with the live address', async () => {
     const log = [];
     const client = makeClient(log);
     const out = await uploadProject({
       client, name: 'x', files, pages: true, deferPages: true,
-      onPreview: ({ preview, repoUrl }) => log.push(['preview', preview.url, repoUrl])
+      onRepoReady: ({ repoUrl, pages }) => log.push(['ready', repoUrl, pages]),
+      onPagesOn: (info) => log.push(['on', info.liveUrl, info.pagesUrl, info.repoUrl])
     });
     const kinds = log.map((l) => l[0]);
-    assert.ok(kinds.indexOf('ref') < kinds.indexOf('preview'));
-    assert.ok(kinds.indexOf('preview') < kinds.indexOf('pages'));
-    assert.deepEqual(log.find((l) => l[0] === 'preview').slice(1), ['https://rawcdn.githack.com/u/x/c1/index.html', 'https://github.com/u/x']);
+    assert.ok(kinds.indexOf('ref') < kinds.indexOf('ready'));
+    assert.ok(kinds.indexOf('ready') < kinds.indexOf('pages'));
+    assert.ok(kinds.indexOf('pages') < kinds.indexOf('on'));
+    assert.deepEqual(log.find((l) => l[0] === 'ready').slice(1), ['https://github.com/u/x', true]);
+    assert.deepEqual(log.find((l) => l[0] === 'on').slice(1), ['https://u.github.io/x/', 'https://u.github.io/x/', 'https://github.com/u/x']);
     assert.equal(out.pagesStatus, 'queued');
-    assert.equal(out.preview.path, 'index.html');
+    assert.equal(out.liveUrl, 'https://u.github.io/x/');
   });
 
-  test('no html means no preview and the repo url is handed over', async () => {
+  test('a tree with only a nested html file lands on that file under the Pages root', async () => {
+    const only = [{ path: 'whatever.html', size: 1, read: async () => new Blob(['a']) }, { path: 'a.css', size: 1, read: async () => new Blob(['a']) }];
+    const out = await uploadProject({ client: makeClient([]), name: 'x', files: only, pages: true, deferPages: true });
+    assert.equal(out.liveUrl, 'https://u.github.io/x/whatever.html');
+  });
+
+  test('pages off hands the repo url over, never calls onPagesOn, and has no live url', async () => {
     const seen = [];
-    const out = await uploadProject({ client: makeClient([]), name: 'x', files: [{ path: 'a.css', size: 1, read: async () => new Blob(['a']) }], pages: false, onPreview: (p) => seen.push(p) });
-    assert.equal(out.preview, null);
-    assert.deepEqual(seen, [{ preview: null, repoUrl: 'https://github.com/u/x' }]);
+    let on = 0;
+    const out = await uploadProject({ client: makeClient([]), name: 'x', files, pages: false, onRepoReady: (p) => seen.push(p), onPagesOn: () => (on += 1) });
+    assert.deepEqual(seen, [{ repoUrl: 'https://github.com/u/x', pages: false }]);
+    assert.equal(on, 0);
+    assert.equal(out.liveUrl, null);
   });
 
   test('waitForPages stops when cancelled', async () => {

@@ -16,7 +16,7 @@ export async function startMock({ login = 'testuser', taken = [], buildsBeforeBu
   const commits = [];
   const repos = new Set(taken.map((n) => n.toLowerCase()));
   const blobs = new Map();
-  const state = { builds: 0, stall: stallQueued, run: { status: 'queued', conclusion: null } };
+  const state = { siteHits: [], repoHits: [], builds: 0, stall: stallQueued, run: { status: 'queued', conclusion: null } };
   let origin = '';
 
   const sha = (text) => createHash('sha1').update(text).digest('hex');
@@ -57,10 +57,16 @@ export async function startMock({ login = 'testuser', taken = [], buildsBeforeBu
         res.end(AVATAR);
         return;
       }
-      let m = path.match(/^\/site\/([^/]+)\/([^/]+)\/?$/);
-      if (req.method === 'GET' && m) return html(`<!doctype html><title>${m[2]}</title><h1>mock site ${m[1]}/${m[2]}</h1>`);
+      let m = path.match(/^\/site\/([^/]+)\/([^/]+)(\/.*)?$/);
+      if (req.method === 'GET' && m) {
+        state.siteHits.push(path);
+        return html(`<!doctype html><title>${m[2]}</title><h1>mock site ${m[1]}/${m[2]}${m[3] || ''}</h1>`);
+      }
       m = path.match(/^\/gh\/([^/]+)\/([^/]+)\/?$/);
-      if (req.method === 'GET' && m) return html(`<!doctype html><title>${m[2]}</title><h1>mock repo ${m[1]}/${m[2]}</h1>`);
+      if (req.method === 'GET' && m) {
+        state.repoHits.push(path);
+        return html(`<!doctype html><title>${m[2]}</title><h1>mock repo ${m[1]}/${m[2]}</h1>`);
+      }
 
       const call = { method: req.method, path, body, auth: req.headers.authorization || '', at: calls.length };
       calls.push(call);
@@ -151,6 +157,8 @@ export async function startMock({ login = 'testuser', taken = [], buildsBeforeBu
     commits,
     login,
     blobs,
+    siteHits: state.siteHits,
+    repoHits: state.repoHits,
     setRun: (status, conclusion = null) => {
       state.run = { status, conclusion };
     },

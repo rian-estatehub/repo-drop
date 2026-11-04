@@ -25,7 +25,8 @@ If you also want to run it on `vercel dev`, add `http://localhost:3000/api/callb
 2. Uploads one blob per file, six at a time, retrying on 403 and 429.
 3. Builds a tree with no base, writes one commit with no parents, message `Initial upload`.
 4. Forces `main` to that commit, so the repo holds exactly one commit.
-5. With Pages on, adds an empty `.nojekyll`, enables Pages from `main` at `/`, and polls every 3 seconds for up to 10 minutes, then every 10 seconds while the tab is open, until the build is `built`. The new tab opens an instant githack.com preview of the commit and never waits on Pages.
+5. With Pages off, the new tab opens the repo.
+6. With Pages on, adds an empty `.nojekyll` and enables Pages from `main` at `/`. The new tab shows a progress page ("GitHub has queued the build", then "Building the site") and checks GitHub every 2 seconds. When the build is done it moves itself to `https://<you>.github.io/<repo>/`, or to the page's own path under it when the project has no `index.html` at the root (for example `.../whatever.html`). It keeps waiting for as long as it is open. After 10 minutes it also shows Open site and Open repo buttons. Keep the repo-drop tab open while it waits, since that tab does the checking.
 
 Skipped on intake: `.git/`, `node_modules/`, `.DS_Store`, `__MACOSX/`, `Thumbs.db`, any file over 100 MB. A dropped folder skips `node_modules/`, `.git/` and `__MACOSX/` as whole folders without reading them. A single HTML file is uploaded as `index.html`.
 

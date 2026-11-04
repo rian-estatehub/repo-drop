@@ -667,7 +667,6 @@ h1 {
 .link-block:nth-child(2) .link-row { animation-delay: 0.08s; }
 .link-block:nth-child(3) .link-row { animation-delay: 0.16s; }
 .link-block { min-width: 0; }
-.link-hint { margin: 8px 4px 0; font-size: 13px; color: var(--muted); }
 .link-row-wait { cursor: default; }
 .link-row-wait:hover { border-color: var(--line-soft); background: var(--surface-raised); }
 .link-state { display: block; font-size: 14px; line-height: 1.45; color: var(--soft); }

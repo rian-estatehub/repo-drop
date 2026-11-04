@@ -1,5 +1,5 @@
 import { buildPlan, captureDrop, readCaptured, readFileInput, sanitizeName, nextFreeName, formatSize } from './lib/intake.js';
-import { createClient, resolveBase, resolveTiming, checkPages, waitForPages, uploadProject } from './lib/github.js';
+import { createClient, resolveBase, resolveTiming, checkPages, uploadProject } from './lib/github.js';
 
 const TOKEN_KEY = 'rd_token';
 const card = document.querySelector('#card');
@@ -27,7 +27,8 @@ const app = {
 };
 
 const timing = resolveTiming(window.location);
-const HOLD_MS = timing.holdMs || 10000;
+const POLL_MS = timing.pollMs || 2000;
+const TIMEOUT_MS = timing.timeoutMs || 600000;
 const QUEUED_TEXT = 'GitHub has queued the build. This part is on GitHub, usually under a minute, sometimes longer.';
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -135,40 +136,37 @@ function viewProgress(name) {
   return `<div class="progress"><p class="step-label" id="step-label">Starting</p><p class="progress-title">${esc(app.user.login)}/${esc(name)}</p><div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="bar"><div class="bar-fill" id="bar-fill"></div></div><p class="progress-detail" id="progress-detail">Opening a tab for the result</p></div>`;
 }
 
-const HINT = 'Instant preview through githack.com. The GitHub Pages link is the permanent one.';
-
 function pagesLine(result, elapsed) {
   const seconds = `${Math.round(elapsed / 1000)} s`;
   const status = result.pagesStatus;
   if (status === 'failed') return `Pages could not be switched on: ${result.pagesError}`;
   if (status === 'building') return `Building the site, ${seconds}`;
   if (status === 'errored') return 'GitHub reported a build error. Still checking while this page is open.';
-  if (status === 'timeout') return 'Still waiting on GitHub. Checking every 10 s while this page is open.';
   return `${QUEUED_TEXT} ${seconds}`;
 }
 
-function linkRow(kind, url, hint) {
-  return `<div class="link-block"><a class="link-row" href="${esc(url)}" target="_blank" rel="noopener"><span class="link-text"><span class="link-kind">${kind}</span><span class="link-url">${esc(url)}</span></span><span class="link-arrow" aria-hidden="true">&#8599;</span></a>${hint ? `<p class="link-hint">${esc(hint)}</p>` : ''}</div>`;
+function linkRow(kind, url) {
+  return `<div class="link-block"><a class="link-row" href="${esc(url)}" target="_blank" rel="noopener"><span class="link-text"><span class="link-kind">${kind}</span><span class="link-url">${esc(url)}</span></span><span class="link-arrow" aria-hidden="true">&#8599;</span></a></div>`;
 }
 
 function pagesRowHtml(result, elapsed) {
   if (result.pagesStatus === 'off') return '';
-  if (result.pagesStatus === 'built') return `<div id="pages-slot">${linkRow('GitHub Pages', result.pagesUrl)}</div>`;
-  const stuck = result.pagesStatus === 'timeout' || result.pagesStatus === 'errored';
-  return `<div id="pages-slot"><div class="link-block"><div class="link-row link-row-wait" id="pages-row"><span class="link-text"><span class="link-kind">GitHub Pages</span><span class="link-state" id="pages-state">${esc(pagesLine(result, elapsed))}</span></span><span class="link-pulse" aria-hidden="true"></span></div></div>${stuck && result.pagesUrl ? pagesButtons(result) : ''}</div>`;
+  if (result.pagesStatus === 'built') return `<div id="pages-slot">${linkRow('GitHub Pages', result.liveUrl)}</div>`;
+  const stuck = result.waitedLong || result.pagesStatus === 'errored';
+  return `<div id="pages-slot"><div class="link-block"><div class="link-row link-row-wait" id="pages-row"><span class="link-text"><span class="link-kind">GitHub Pages</span><span class="link-state" id="pages-state">${esc(pagesLine(result, elapsed))}</span></span><span class="link-pulse" aria-hidden="true"></span></div></div>${stuck && result.liveUrl ? pagesButtons(result) : ''}</div>`;
 }
 
 function pagesButtons(result) {
-  return `<div class="pages-actions" id="pages-actions"><a class="btn-primary" id="open-site-btn" href="${esc(result.pagesUrl)}" target="_blank" rel="noopener">Open site</a><a class="btn-ghost" id="open-repo-btn" href="${esc(result.repoUrl)}" target="_blank" rel="noopener">Open repo</a></div>`;
+  return `<div class="pages-actions" id="pages-actions"><a class="btn-primary" id="open-site-btn" href="${esc(result.liveUrl)}" target="_blank" rel="noopener">Open site</a><a class="btn-ghost" id="open-repo-btn" href="${esc(result.repoUrl)}" target="_blank" rel="noopener">Open repo</a></div>`;
 }
 
 function viewDone(result, opened, elapsed) {
-  const live = result.pagesStatus === 'built' && result.pagesUrl;
+  const live = result.pagesStatus === 'built' && result.liveUrl;
   const count = app.plan.files.length;
-  const first = result.preview ? result.preview.url : result.pagesUrl || result.repoUrl;
-  const firstKind = result.preview ? 'preview' : result.pagesUrl ? 'site' : 'repo';
+  const first = result.liveUrl || result.repoUrl;
+  const firstKind = result.liveUrl ? 'site' : 'repo';
   const note = result.pagesStatus === 'failed' ? pagesLine(result, elapsed) : '';
-  return `<div class="done"><div class="done-head"><div class="done-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div><div><p class="done-title" id="done-title">${live ? 'It is live.' : 'Repo created.'}</p><p class="done-sub">${count} ${count === 1 ? 'file' : 'files'} &middot; one commit &middot; ${esc(result.owner)}/${esc(result.name)}</p></div></div>${note ? `<p class="done-note">${esc(note)}</p>` : ''}<div class="links">${result.preview ? linkRow('Preview', result.preview.url, HINT) : ''}${result.pagesStatus === 'failed' ? '' : pagesRowHtml(result, elapsed)}${linkRow('Repository', result.repoUrl)}</div><div class="done-actions">${opened ? '' : `<a class="btn-primary btn-primary-big" id="open-btn" href="${esc(first)}" target="_blank" rel="noopener">Open ${firstKind}</a>`}<button type="button" class="${opened ? 'btn-primary' : 'btn-ghost'}" id="again-btn" data-act="drop-another">Drop another</button></div></div>`;
+  return `<div class="done"><div class="done-head"><div class="done-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div><div><p class="done-title" id="done-title">${live ? 'It is live.' : 'Repo created.'}</p><p class="done-sub">${count} ${count === 1 ? 'file' : 'files'} &middot; one commit &middot; ${esc(result.owner)}/${esc(result.name)}</p></div></div>${note ? `<p class="done-note">${esc(note)}</p>` : ''}<div class="links">${result.pagesStatus === 'failed' ? '' : pagesRowHtml(result, elapsed)}${linkRow('Repository', result.repoUrl)}</div><div class="done-actions">${opened ? '' : `<a class="btn-primary btn-primary-big" id="open-btn" href="${esc(first)}" target="_blank" rel="noopener">Open ${firstKind}</a>`}<button type="button" class="${opened ? 'btn-primary' : 'btn-ghost'}" id="again-btn" data-act="drop-another">Drop another</button></div></div>`;
 }
 
 function viewProblem(title, text, actions) {
@@ -384,8 +382,93 @@ async function checkTyped() {
   }
 }
 
+function tabRuntime() {
+  const byId = (id) => document.getElementById(id);
+  const buttons = (items) => {
+    const box = byId('tab-actions');
+    box.innerHTML = '';
+    for (const item of items) {
+      const link = document.createElement('a');
+      link.className = item.primary ? 'tab-btn tab-btn-primary' : 'tab-btn';
+      link.textContent = item.label;
+      link.href = item.href;
+      box.appendChild(link);
+    }
+  };
+  window.rdStop = (text, items) => {
+    byId('tab-step').textContent = 'GitHub Pages';
+    byId('tab-detail').textContent = text;
+    buttons(items);
+  };
+  window.rdWatch = (cfg, check) => {
+    const started = Date.now();
+    const pause = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+    const seconds = () => Math.round((Date.now() - started) / 1000);
+    const links = [
+      { label: 'Open site', href: cfg.liveUrl, primary: true },
+      { label: 'Open repo', href: cfg.repoUrl }
+    ];
+    let phase = 'queued';
+    let finished = false;
+    let shown = false;
+    const line = () => {
+      if (phase === 'building') return `Building the site, ${seconds()} s`;
+      if (phase === 'errored') return 'GitHub reported a build error. Still checking while this tab is open.';
+      return `${cfg.queuedText} ${seconds()} s`;
+    };
+    const paint = () => {
+      if (finished) return;
+      byId('tab-step').textContent = 'GitHub Pages';
+      byId('tab-detail').textContent = line();
+      byId('tab-fill').style.width = phase === 'building' ? '97%' : '94%';
+      if (!shown && Date.now() - started >= cfg.timeoutMs) {
+        shown = true;
+        buttons(links);
+      }
+    };
+    const ticker = window.setInterval(paint, 1000);
+    const run = async () => {
+      paint();
+      while (!finished) {
+        await pause(cfg.pollMs);
+        if (finished) return;
+        try {
+          if (!window.opener || window.opener.closed) throw new Error('closed');
+          phase = await check();
+        } catch (err) {
+          finished = true;
+          window.clearInterval(ticker);
+          window.rdStop('This tab can no longer check GitHub. Use the buttons below.', links);
+          return;
+        }
+        if (phase === 'built') {
+          finished = true;
+          window.clearInterval(ticker);
+          byId('tab-detail').textContent = 'Opening the site';
+          byId('tab-fill').style.width = '100%';
+          const started = Date.now();
+          for (;;) {
+            try {
+              const res = await fetch(cfg.liveUrl, { cache: 'no-store' });
+              if (res.ok) break;
+            } catch (err) {
+              if (Date.now() - started > 60000) break;
+            }
+            if (Date.now() - started > 60000) break;
+            await pause(1500);
+          }
+          window.location.replace(cfg.liveUrl);
+          return;
+        }
+        paint();
+      }
+    };
+    run();
+  };
+}
+
 function tabHtml(title) {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>repo-drop &middot; ${esc(title)}</title><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500&display=swap"><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#050505;background-image:radial-gradient(800px 420px at 50% -8%,rgba(243,227,200,.07),transparent 70%);color:#f2f2f3;font-family:Outfit,ui-sans-serif,system-ui,sans-serif;-webkit-font-smoothing:antialiased}main{width:min(520px,100% - 32px);animation:rise .7s cubic-bezier(.22,1,.36,1) both}@keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}p{margin:0}.eyebrow{font-size:12px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:#8e8e93;display:flex;align-items:center;gap:10px}.dot{width:6px;height:6px;border-radius:50%;background:#f3e3c8;box-shadow:0 0 0 3px rgba(243,227,200,.12)}h1{margin:14px 0 22px;font-size:34px;font-weight:500;letter-spacing:-.03em;line-height:1.1;overflow-wrap:anywhere}.bar{height:4px;border-radius:999px;background:#1a1a1d;overflow:hidden}.fill{height:100%;width:0;border-radius:999px;background:linear-gradient(90deg,#cdb78f,#fff);transition:width .5s cubic-bezier(.22,1,.36,1)}.detail{margin-top:14px;font-size:14px;color:#8e8e93}@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}</style></head><body><main><p class="eyebrow"><span class="dot"></span><span id="tab-step">Starting</span></p><h1>${esc(title)}</h1><div class="bar"><div class="fill" id="tab-fill"></div></div><p class="detail" id="tab-detail">Getting ready</p></main></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>repo-drop &middot; ${esc(title)}</title><script>(${tabRuntime.toString()})()</script><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500&display=swap"><style>*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#050505;background-image:radial-gradient(800px 420px at 50% -8%,rgba(243,227,200,.07),transparent 70%);color:#f2f2f3;font-family:Outfit,ui-sans-serif,system-ui,sans-serif;-webkit-font-smoothing:antialiased}main{width:min(520px,100% - 32px);animation:rise .7s cubic-bezier(.22,1,.36,1) both}@keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}p{margin:0}.eyebrow{font-size:12px;font-weight:500;letter-spacing:.2em;text-transform:uppercase;color:#8e8e93;display:flex;align-items:center;gap:10px}.dot{width:6px;height:6px;border-radius:50%;background:#f3e3c8;box-shadow:0 0 0 3px rgba(243,227,200,.12)}h1{margin:14px 0 22px;font-size:34px;font-weight:500;letter-spacing:-.03em;line-height:1.1;overflow-wrap:anywhere}.bar{height:4px;border-radius:999px;background:#1a1a1d;overflow:hidden}.fill{height:100%;width:0;border-radius:999px;background:linear-gradient(90deg,#cdb78f,#fff);transition:width .5s cubic-bezier(.22,1,.36,1)}.detail{margin-top:14px;font-size:14px;color:#8e8e93}.tab-actions{display:flex;gap:12px;flex-wrap:wrap;margin-top:24px}.tab-actions:empty{display:none}.tab-btn{display:inline-flex;align-items:center;justify-content:center;height:46px;padding:0 22px;border-radius:999px;border:1px solid rgba(255,255,255,.14);font-size:15px;font-weight:500;color:#c9c9ce;text-decoration:none;animation:rise .5s cubic-bezier(.22,1,.36,1) both}.tab-btn:hover{background:rgba(255,255,255,.07);color:#fff}.tab-btn-primary{background:#f4f4f5;border-color:transparent;color:#0a0a0b}.tab-btn-primary:hover{background:#fff;color:#0a0a0b}@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}</style></head><body><main><p class="eyebrow"><span class="dot"></span><span id="tab-step">Starting</span></p><h1>${esc(title)}</h1><div class="bar"><div class="fill" id="tab-fill"></div></div><p class="detail" id="tab-detail">Getting ready</p><div class="tab-actions" id="tab-actions"></div></main></body></html>`;
 }
 
 function tabWrite(tab, title) {
@@ -457,38 +540,83 @@ function startUpload() {
   runUpload(name);
 }
 
+function takeTab() {
+  const tab = app.popup;
+  app.popup = null;
+  return tab && !tab.closed && app.tabReady ? tab : null;
+}
+
+function makeCheck(client, owner, name, track) {
+  return async () => {
+    try {
+      track.phase = await checkPages(client, owner, name);
+      track.checkedAt = Date.now();
+    } catch (err) {
+      if (err && err.status === 401) throw err;
+    }
+    return track.phase;
+  };
+}
+
 async function runUpload(name) {
   await morph(viewProgress(name), 'progress');
   setProgress(...STAGES.repo);
   const runId = app.runId;
+  const client = app.client;
+  const track = { phase: 'queued', checkedAt: 0, startedAt: 0 };
   let opened = false;
   try {
     const result = await uploadProject({
-      client: app.client,
+      client,
       name,
       files: app.plan.files,
       pages: app.pages,
       deferPages: true,
-      pollMs: timing.pollMs,
+      pollMs: POLL_MS,
       onStage: (stage) => {
         if (STAGES[stage]) setProgress(...STAGES[stage]);
       },
       onProgress: (done, total) => {
         setProgress('Uploading files', `${done} of ${total} files`, 8 + (done / Math.max(1, total)) * 70);
       },
-      onPreview: ({ preview, repoUrl }) => {
-        const tab = app.popup;
-        app.popup = null;
-        if (!tab || tab.closed) return;
+      onRepoReady: ({ repoUrl, pages }) => {
+        if (pages) return;
+        const tab = takeTab();
+        if (!tab) return;
         try {
-          tab.location.href = preview ? preview.url : repoUrl;
+          tab.location.href = repoUrl;
+          opened = true;
+        } catch (err) {
+          opened = false;
+        }
+      },
+      onPagesOn: (info) => {
+        track.startedAt = Date.now();
+        const tab = takeTab();
+        if (!tab) return;
+        try {
+          tab.rdWatch(
+            { liveUrl: info.liveUrl, repoUrl: info.repoUrl, pollMs: POLL_MS, timeoutMs: TIMEOUT_MS, queuedText: QUEUED_TEXT },
+            makeCheck(client, info.owner, info.name, track)
+          );
           opened = true;
         } catch (err) {
           opened = false;
         }
       }
     });
-    await finish(result, opened, runId);
+    if (result.pagesStatus === 'failed') {
+      const tab = takeTab();
+      if (tab) {
+        try {
+          tab.rdStop(`Pages could not be switched on: ${result.pagesError}`, [{ label: 'Open repo', href: result.repoUrl, primary: true }]);
+          opened = true;
+        } catch (err) {
+          opened = false;
+        }
+      }
+    }
+    await finish(result, opened, runId, track, client);
   } catch (err) {
     fail(err);
   }
@@ -508,66 +636,46 @@ async function swapLive(result, runId) {
     slot.classList.add('swap');
     await wait(reduced() ? 0 : 180);
     if (app.runId !== runId) return;
-    slot.innerHTML = linkRow('GitHub Pages', result.pagesUrl);
+    slot.innerHTML = linkRow('GitHub Pages', result.liveUrl);
     slot.classList.remove('swap');
   }
 }
 
-async function watchPages(result, runId, startedAt) {
+async function watchPages(result, runId, startedAt, track, check) {
   const alive = () => app.runId === runId;
-  const set = (status) => {
-    if (result.pagesStatus === status) return;
-    result.pagesStatus = status;
-  };
-  let status = await waitForPages(app.client, result.owner, result.name, {
-    intervalMs: timing.pollMs || 3000,
-    timeoutMs: timing.timeoutMs,
-    cancelled: () => !alive(),
-    onTick: (elapsed, limit, phase) => {
-      if (!alive()) return;
-      set(phase === 'built' ? 'built' : phase);
-      paintPages(result, startedAt);
-    }
-  }).catch((err) => (err && err.status === 401 ? 'cancelled' : 'timeout'));
-  if (!alive() || status === 'cancelled') return;
-  if (status === 'built') return swapLive(result, runId);
-  set(status);
-  const showStuck = () => {
-    const slot = $('#pages-slot');
-    if (slot && !$('#pages-actions') && result.pagesUrl) slot.insertAdjacentHTML('beforeend', pagesButtons(result));
-    paintPages(result, startedAt);
-  };
-  showStuck();
   while (alive()) {
-    await wait(HOLD_MS);
+    await wait(POLL_MS);
     if (!alive()) return;
-    let phase = 'queued';
-    try {
-      phase = await checkPages(app.client, result.owner, result.name);
-    } catch (err) {
-      phase = status;
+    if (Date.now() - track.checkedAt >= POLL_MS * 2.5) {
+      try {
+        await check();
+      } catch (err) {
+        if (err && err.status === 401) return;
+      }
     }
     if (!alive()) return;
-    if (phase === 'built') {
-      result.pagesStatus = 'built';
-      return swapLive(result, runId);
+    result.pagesStatus = track.phase;
+    if (track.phase === 'built') return swapLive(result, runId);
+    if (!result.waitedLong && Date.now() - startedAt >= TIMEOUT_MS) {
+      result.waitedLong = true;
+      const slot = $('#pages-slot');
+      if (slot && !$('#pages-actions')) slot.insertAdjacentHTML('beforeend', pagesButtons(result));
     }
-    result.pagesStatus = phase === 'errored' ? 'errored' : 'timeout';
     paintPages(result, startedAt);
   }
 }
 
-async function finish(result, opened, runId) {
+async function finish(result, opened, runId, track, client) {
   setProgress('Done', 'Opening the result', 100);
   await wait(reduced() ? 0 : 520);
   app.busy = false;
-  const startedAt = Date.now();
-  await morph(viewDone(result, opened, 0), 'done', () => {
+  const startedAt = track.startedAt || Date.now();
+  await morph(viewDone(result, opened, Date.now() - startedAt), 'done', () => {
     const el = $('#open-btn') || $('#again-btn');
     if (el) el.focus({ preventScroll: true });
   });
-  if (result.pagesUrl && result.pagesStatus !== 'built' && result.pagesStatus !== 'failed') {
-    watchPages(result, runId, startedAt);
+  if (result.liveUrl && result.pagesStatus !== 'built' && result.pagesStatus !== 'failed') {
+    watchPages(result, runId, startedAt, track, makeCheck(client, result.owner, result.name, track));
     const tick = setInterval(() => {
       if (app.runId !== runId || result.pagesStatus === 'built') return clearInterval(tick);
       paintPages(result, startedAt);

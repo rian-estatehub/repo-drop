@@ -54,13 +54,6 @@ export async function prepare(context, { token, blockFonts = true }) {
     if (zip) return route.fulfill({ path: zip, contentType: 'text/javascript' });
     return route.abort();
   });
-  context.githackRequests = [];
-  context.snapshot = () => null;
-  await context.route(/^https:\/\/(rawcdn|raw)\.githack\.com\//, (route) => {
-    const url = route.request().url();
-    context.githackRequests.push({ url, seen: context.snapshot() });
-    return route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: '<!doctype html><title>preview</title><body style="margin:0;background:#fff;font:600 28px sans-serif;padding:40px">Instant preview stub</body>' });
-  });
   if (blockFonts) {
     await context.route(/fonts\.(googleapis|gstatic)\.com/, (route) => route.abort());
   }
