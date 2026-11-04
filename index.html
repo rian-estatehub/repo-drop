@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>repo-drop</title>
+<meta name="description" content="Drop a project folder, zip or HTML file. It becomes a public GitHub repo, live on Pages.">
+<meta name="theme-color" content="#050505">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23050505'/%3E%3Ccircle cx='16' cy='16' r='11' fill='none' stroke='%23555' stroke-width='1.5'/%3E%3Ccircle cx='16' cy='16' r='5' fill='%23f3e3c8'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="styles.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js" defer></script>
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="pill" id="pill"></div>
+</header>
+
+<main class="stage">
+  <p class="eyebrow reveal" style="--d:0ms"><span class="eyebrow-dot"></span>Deploy &middot; New public repo</p>
+  <h1 class="reveal" style="--d:70ms">Upload your project files</h1>
+  <section class="card reveal" id="card" data-state="boot" style="--d:140ms" aria-live="polite">
+    <div class="card-inner" id="card-inner"></div>
+  </section>
+  <p class="notice" id="notice" role="status"></p>
+  <p class="foot-note reveal" style="--d:220ms">Files go from your browser straight to GitHub. Nothing is stored here.</p>
+</main>
+
+<input type="file" id="pick-files" class="visually-hidden" accept=".html,.htm,.zip,text/html,application/zip" multiple tabindex="-1">
+<input type="file" id="pick-folder" class="visually-hidden" webkitdirectory tabindex="-1">
+</body>
+</html>
