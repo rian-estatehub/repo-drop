@@ -4,11 +4,6 @@
   "private": true,
   "type": "module",
   "description": "Drop a project folder, zip or HTML file and it becomes a public GitHub repo, live on Pages.",
-  "scripts": {
-    "test": "node --test tests/intake.test.js tests/github.test.js tests/callback.test.js",
-    "test:e2e": "node --test tests/e2e.test.js",
-    "shots": "node tests/shots.js"
-  },
   "engines": {
     "node": ">=18"
   }

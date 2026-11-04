@@ -1,5 +1,5 @@
 import { buildPlan, captureDrop, readCaptured, readFileInput, sanitizeName, nextFreeName, formatSize } from './lib/intake.js';
-import { createClient, resolveBase, resolveTiming, checkPages, uploadProject } from './lib/github.js';
+import { createClient, resolveBase, resolveTiming, checkPages, probeSite, uploadProject } from './lib/github.js';
 
 const TOKEN_KEY = 'rd_token';
 const card = document.querySelector('#card');
@@ -411,7 +411,9 @@ function tabRuntime() {
     let phase = 'queued';
     let finished = false;
     let shown = false;
+    let builtAt = 0;
     const line = () => {
+      if (phase === 'built') return 'Opening the site';
       if (phase === 'building') return `Building the site, ${seconds()} s`;
       if (phase === 'errored') return 'GitHub reported a build error. Still checking while this tab is open.';
       return `${cfg.queuedText} ${seconds()} s`;
@@ -420,45 +422,55 @@ function tabRuntime() {
       if (finished) return;
       byId('tab-step').textContent = 'GitHub Pages';
       byId('tab-detail').textContent = line();
-      byId('tab-fill').style.width = phase === 'building' ? '97%' : '94%';
+      byId('tab-fill').style.width = phase === 'queued' || phase === 'errored' ? '94%' : '97%';
       if (!shown && Date.now() - started >= cfg.timeoutMs) {
         shown = true;
         buttons(links);
       }
     };
     const ticker = window.setInterval(paint, 1000);
+    const probe = async () => {
+      try {
+        const res = await fetch(`${cfg.liveUrl}${cfg.liveUrl.includes('?') ? '&' : '?'}rd=${Date.now()}`);
+        return res.ok;
+      } catch (err) {
+        return false;
+      }
+    };
+    const look = async () => {
+      if (phase === 'built') return true;
+      try {
+        if (!window.opener || window.opener.closed) throw new Error('closed');
+        phase = await check();
+        return true;
+      } catch (err) {
+        return false;
+      }
+    };
+    const open = () => {
+      finished = true;
+      window.clearInterval(ticker);
+      byId('tab-detail').textContent = 'Opening the site';
+      byId('tab-fill').style.width = '100%';
+      window.location.replace(cfg.liveUrl);
+    };
     const run = async () => {
       paint();
       while (!finished) {
         await pause(cfg.pollMs);
         if (finished) return;
-        try {
-          if (!window.opener || window.opener.closed) throw new Error('closed');
-          phase = await check();
-        } catch (err) {
+        const [live, watching] = await Promise.all([probe(), look()]);
+        if (finished) return;
+        if (live) return open();
+        if (!watching) {
           finished = true;
           window.clearInterval(ticker);
           window.rdStop('This tab can no longer check GitHub. Use the buttons below.', links);
           return;
         }
         if (phase === 'built') {
-          finished = true;
-          window.clearInterval(ticker);
-          byId('tab-detail').textContent = 'Opening the site';
-          byId('tab-fill').style.width = '100%';
-          const started = Date.now();
-          for (;;) {
-            try {
-              const res = await fetch(cfg.liveUrl, { cache: 'no-store' });
-              if (res.ok) break;
-            } catch (err) {
-              if (Date.now() - started > 60000) break;
-            }
-            if (Date.now() - started > 60000) break;
-            await pause(1500);
-          }
-          window.location.replace(cfg.liveUrl);
-          return;
+          builtAt = builtAt || Date.now();
+          if (Date.now() - builtAt >= 60000) return open();
         }
         paint();
       }
@@ -643,19 +655,35 @@ async function swapLive(result, runId) {
 
 async function watchPages(result, runId, startedAt, track, check) {
   const alive = () => app.runId === runId;
+  let builtAt = 0;
+  let expired = false;
   while (alive()) {
     await wait(POLL_MS);
     if (!alive()) return;
-    if (Date.now() - track.checkedAt >= POLL_MS * 2.5) {
-      try {
-        await check();
-      } catch (err) {
-        if (err && err.status === 401) return;
-      }
+    const needCheck = !builtAt && Date.now() - track.checkedAt >= POLL_MS * 2.5;
+    const [live] = await Promise.all([
+      probeSite(result.liveUrl),
+      needCheck
+        ? check().catch((err) => {
+            if (err && err.status === 401) expired = true;
+          })
+        : null
+    ]);
+    if (!alive() || (expired && !live)) return;
+    if (live) {
+      result.pagesStatus = 'built';
+      return swapLive(result, runId);
     }
-    if (!alive()) return;
-    result.pagesStatus = track.phase;
-    if (track.phase === 'built') return swapLive(result, runId);
+    if (track.phase === 'built') {
+      builtAt = builtAt || Date.now();
+      if (Date.now() - builtAt >= 60000) {
+        result.pagesStatus = 'built';
+        return swapLive(result, runId);
+      }
+      result.pagesStatus = 'building';
+    } else {
+      result.pagesStatus = track.phase;
+    }
     if (!result.waitedLong && Date.now() - startedAt >= TIMEOUT_MS) {
       result.waitedLong = true;
       const slot = $('#pages-slot');

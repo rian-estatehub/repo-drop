@@ -29,13 +29,3 @@ If you also want to run it on `vercel dev`, add `http://localhost:3000/api/callb
 6. With Pages on, adds an empty `.nojekyll` and enables Pages from `main` at `/`. The new tab shows a progress page ("GitHub has queued the build", then "Building the site") and checks GitHub every 2 seconds. When the build is done it moves itself to `https://<you>.github.io/<repo>/`, or to the page's own path under it when the project has no `index.html` at the root (for example `.../whatever.html`). It keeps waiting for as long as it is open. After 10 minutes it also shows Open site and Open repo buttons. Keep the repo-drop tab open while it waits, since that tab does the checking.
 
 Skipped on intake: `.git/`, `node_modules/`, `.DS_Store`, `__MACOSX/`, `Thumbs.db`, any file over 100 MB. A dropped folder skips `node_modules/`, `.git/` and `__MACOSX/` as whole folders without reading them. A single HTML file is uploaded as `index.html`.
-
-## Tests
-
-```
-npm test
-PW_DIR=/path/to/folder-with-playwright npm run test:e2e
-PW_DIR=/path/to/folder-with-playwright npm run shots
-```
-
-`npm test` runs the unit tests with `node:test`, no installs. The end to end run uses a local mock of the GitHub API and a headless Chromium through Playwright, which is not a dependency of this project: install `playwright` and `jszip` in a separate folder and point `PW_DIR` at it. The page honours `?api=` to point at a mock only when it runs on `localhost` or `127.0.0.1`.
