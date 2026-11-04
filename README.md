@@ -25,7 +25,7 @@ If you also want to run it on `vercel dev`, add `http://localhost:3000/api/callb
 2. Uploads one blob per file, six at a time, retrying on 403 and 429.
 3. Builds a tree with no base, writes one commit with no parents, message `Initial upload`.
 4. Forces `main` to that commit, so the repo holds exactly one commit.
-5. With Pages on, adds an empty `.nojekyll`, enables Pages from `main` at `/`, and polls every 3 seconds until the build is `built` (gives up at 3 minutes and opens the repo with a note).
+5. With Pages on, adds an empty `.nojekyll`, enables Pages from `main` at `/`, and polls every 3 seconds for up to 10 minutes, then every 10 seconds while the tab is open, until the build is `built`. The new tab opens an instant githack.com preview of the commit and never waits on Pages.
 
 Skipped on intake: `.git/`, `node_modules/`, `.DS_Store`, `__MACOSX/`, `Thumbs.db`, any file over 100 MB. A dropped folder skips `node_modules/`, `.git/` and `__MACOSX/` as whole folders without reading them. A single HTML file is uploaded as `index.html`.
 

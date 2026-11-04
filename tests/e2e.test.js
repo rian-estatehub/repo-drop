@@ -34,7 +34,7 @@ describe('repo-drop end to end', { skip }, () => {
     if (web) await web.close();
   });
 
-  async function session({ taken = [], token = 'fake-token', width = 1280, height = 800, mock } = {}) {
+  async function session({ taken = [], token = 'fake-token', width = 1280, height = 800, mock, query = '' } = {}) {
     const api = mock || (await startMock({ taken }));
     const context = await browser.newContext({ viewport: { width, height } });
     await prepare(context, { token });
@@ -45,12 +45,12 @@ describe('repo-drop end to end', { skip }, () => {
       await context.close();
       if (!mock) await api.close();
     });
-    await page.goto(`${web.origin}/?api=${api.origin}`);
+    await page.goto(`${web.origin}/?api=${api.origin}${query}`);
     return { api, context, page, errors };
   }
 
-  test('drop a folder, confirm, upload: every GitHub call lands and a second tab ends on the site', async () => {
-    const { api, context, page, errors } = await session();
+  test('drop a folder, confirm, upload: every GitHub call lands, the second tab ends on the preview and the card goes live', async () => {
+    const { api, context, page, errors } = await session({ query: '&pollMs=80' });
     await page.waitForSelector('#card[data-state="idle"]');
     assert.equal(await page.textContent('.pill-login'), 'testuser');
 
@@ -69,8 +69,9 @@ describe('repo-drop end to end', { skip }, () => {
     const popup = await popupPromise;
 
     await page.waitForSelector('#card[data-state="done"]', { timeout: 20000 });
-    await popup.waitForURL(`${api.origin}/site/testuser/mysite/`, { timeout: 15000 });
-    assert.equal(popup.url(), `${api.origin}/site/testuser/mysite/`);
+    await page.waitForSelector('.done-title:has-text("It is live")', { timeout: 15000 });
+    const previewUrl = `https://rawcdn.githack.com/testuser/mysite/${api.commits[0]}/index.html`;
+    assert.equal(popup.url(), previewUrl);
 
     const repoCalls = api.callsTo('POST', /^\/user\/repos$/);
     assert.equal(repoCalls.length, 1);
@@ -120,9 +121,84 @@ describe('repo-drop end to end', { skip }, () => {
     assert.ok(writes.every((c) => c.auth === 'Bearer fake-token'));
 
     const hrefs = await page.locator('.link-row').evaluateAll((els) => els.map((e) => e.href));
-    assert.deepEqual(hrefs, [`${api.origin}/site/testuser/mysite/`, `${api.origin}/gh/testuser/mysite`]);
+    assert.deepEqual(hrefs, [previewUrl, `${api.origin}/site/testuser/mysite/`, `${api.origin}/gh/testuser/mysite`]);
     assert.match(await page.textContent('.done-title'), /It is live/);
     assert.deepEqual(errors, []);
+  });
+
+  test('the new tab lands on the githack preview at the exact commit before any Pages poll, and the card swaps to the live link when the build flips', async () => {
+    const out = process.env.OUT || '';
+    if (out) mkdirSync(out, { recursive: true });
+    const mock = await startMock({ stallQueued: true });
+    open.push(() => mock.close());
+    const { api, context, page, errors } = await session({
+      mock,
+      width: 1440,
+      height: 900,
+      query: '&pollMs=1500&timeoutMs=6000&holdMs=120'
+    });
+    context.snapshot = () => api.callsTo('GET', /\/pages\/builds\/latest$/).length;
+    await page.waitForSelector('#card[data-state="idle"]');
+    await dropTree(page, ['dir', 'solo', [['file', 'index.html', '<h1>solo</h1>']]]);
+    await page.waitForSelector('#card[data-state="confirm"]');
+    const popupPromise = context.waitForEvent('page');
+    await page.click('#upload-btn');
+    const popup = await popupPromise;
+
+    const preview = () => `https://rawcdn.githack.com/testuser/solo/${api.commits[0]}/index.html`;
+    await popup.waitForURL(/rawcdn\.githack\.com/, { timeout: 15000 });
+    assert.equal(popup.url(), preview());
+    assert.equal(api.commits.length, 1);
+    assert.equal(context.githackRequests.length, 1);
+    assert.equal(context.githackRequests[0].url, preview());
+    assert.equal(context.githackRequests[0].seen, 0);
+    assert.equal(api.callsTo('PATCH', /\/git\/refs\/heads\/main$/)[0].body.sha, api.commits[0]);
+    assert.equal(await popup.textContent('body'), 'Instant preview stub');
+
+    await page.waitForSelector('#card[data-state="done"]', { timeout: 20000 });
+    await page.waitForFunction(() => /GitHub has queued the build\. This part is on GitHub, usually under a minute, sometimes longer\. \d+ s/.test(document.querySelector('#pages-state').textContent), null, { timeout: 10000 });
+    assert.equal((await page.textContent('.link-hint')).trim(), 'Instant preview through githack.com. The GitHub Pages link is the permanent one.');
+    const kinds = await page.locator('.link-kind').allTextContents();
+    assert.deepEqual(kinds, ['Preview', 'GitHub Pages', 'Repository']);
+    assert.equal(await page.locator('#pages-actions').count(), 0);
+    if (out) {
+      await page.waitForTimeout(900);
+      await page.screenshot({ path: `${out}/done-preview-1440.png` });
+    }
+    if (out) await popup.screenshot({ path: `${out}/queued-1440.png` });
+
+    await page.waitForSelector('#pages-actions', { timeout: 20000 });
+    assert.deepEqual(await page.locator('#pages-actions a').allTextContents(), ['Open site', 'Open repo']);
+    const hrefs = await page.locator('#pages-actions a').evaluateAll((els) => els.map((e) => e.href));
+    assert.deepEqual(hrefs, [`${api.origin}/site/testuser/solo/`, `${api.origin}/gh/testuser/solo`]);
+    assert.match(await page.textContent('#pages-state'), /Still waiting on GitHub/);
+    assert.equal(popup.url(), preview());
+    assert.equal(api.calls.filter((c) => /^\/gh\//.test(c.path)).length, 0);
+    if (out) await page.screenshot({ path: `${out}/waiting-buttons-1440.png` });
+
+    mock.setRun('in_progress');
+    mock.release();
+    await page.waitForSelector('.done-title:has-text("It is live")', { timeout: 10000 });
+    await page.waitForFunction(() => document.querySelectorAll('a.link-row').length === 3);
+    const rows = await page.locator('a.link-row').evaluateAll((els) => els.map((e) => e.href));
+    assert.deepEqual(rows, [preview(), `${api.origin}/site/testuser/solo/`, `${api.origin}/gh/testuser/solo`]);
+    assert.equal(await page.locator('#pages-state').count(), 0);
+    assert.equal(popup.url(), preview());
+    assert.deepEqual(errors, []);
+  });
+
+  test('a project with no html opens the repo in the new tab and never the githack preview', async () => {
+    const { api, context, page } = await session({ query: '&pollMs=60' });
+    await page.waitForSelector('#card[data-state="idle"]');
+    await dropTree(page, ['dir', 'assets', [['file', 'a.css', 'body{}'], ['file', 'b.js', '1']]]);
+    await page.waitForSelector('#card[data-state="confirm"]');
+    const popupPromise = context.waitForEvent('page');
+    await page.click('#upload-btn');
+    const popup = await popupPromise;
+    await popup.waitForURL(`${api.origin}/gh/testuser/assets`, { timeout: 15000 });
+    await page.waitForSelector('#card[data-state="done"]', { timeout: 20000 });
+    assert.deepEqual(await page.locator('.link-kind').allTextContents().then((k) => k.filter((x) => x === 'Preview')), []);
+    assert.equal(context.githackRequests.length, 0);
   });
 
   test('a taken name is suggested as name-2, and typing a taken name offers the chip', async () => {
@@ -149,7 +225,7 @@ describe('repo-drop end to end', { skip }, () => {
     assert.equal(api.callsTo('POST', /\/user\/repos$/).length, 0);
   });
 
-  test('folder pick with Pages off: node_modules files skipped, no pages call, tab ends on the repo', async () => {
+  test('folder pick with Pages off: node_modules files skipped, no pages call, tab ends on the preview', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'rd-pick-'));
     open.push(async () => rmSync(dir, { recursive: true, force: true }));
     const root = join(dir, 'picked');
@@ -175,7 +251,7 @@ describe('repo-drop end to end', { skip }, () => {
     await page.click('#upload-btn');
     const popup = await popupPromise;
     await page.waitForSelector('#card[data-state="done"]', { timeout: 20000 });
-    await popup.waitForURL(`${api.origin}/gh/testuser/picked`, { timeout: 15000 });
+    await popup.waitForURL(/rawcdn\.githack\.com\/testuser\/picked\/[0-9a-f]{40}\/index\.html$/, { timeout: 15000 });
 
     const tree = api.callsTo('POST', /\/git\/trees$/)[0].body.tree.map((t) => t.path).sort();
     assert.deepEqual(tree, ['app.js', 'index.html']);

@@ -1,5 +1,5 @@
 import { buildPlan, captureDrop, readCaptured, readFileInput, sanitizeName, nextFreeName, formatSize } from './lib/intake.js';
-import { createClient, resolveBase, uploadProject } from './lib/github.js';
+import { createClient, resolveBase, resolveTiming, checkPages, waitForPages, uploadProject } from './lib/github.js';
 
 const TOKEN_KEY = 'rd_token';
 const card = document.querySelector('#card');
@@ -22,8 +22,13 @@ const app = {
   taken: false,
   empty: false,
   popup: null,
-  tabReady: false
+  tabReady: false,
+  runId: 0
 };
+
+const timing = resolveTiming(window.location);
+const HOLD_MS = timing.holdMs || 10000;
+const QUEUED_TEXT = 'GitHub has queued the build. This part is on GitHub, usually under a minute, sometimes longer.';
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const reduced = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -130,12 +135,40 @@ function viewProgress(name) {
   return `<div class="progress"><p class="step-label" id="step-label">Starting</p><p class="progress-title">${esc(app.user.login)}/${esc(name)}</p><div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="bar"><div class="bar-fill" id="bar-fill"></div></div><p class="progress-detail" id="progress-detail">Opening a tab for the result</p></div>`;
 }
 
-function viewDone(result, opened, targetUrl, note) {
+const HINT = 'Instant preview through githack.com. The GitHub Pages link is the permanent one.';
+
+function pagesLine(result, elapsed) {
+  const seconds = `${Math.round(elapsed / 1000)} s`;
+  const status = result.pagesStatus;
+  if (status === 'failed') return `Pages could not be switched on: ${result.pagesError}`;
+  if (status === 'building') return `Building the site, ${seconds}`;
+  if (status === 'errored') return 'GitHub reported a build error. Still checking while this page is open.';
+  if (status === 'timeout') return 'Still waiting on GitHub. Checking every 10 s while this page is open.';
+  return `${QUEUED_TEXT} ${seconds}`;
+}
+
+function linkRow(kind, url, hint) {
+  return `<div class="link-block"><a class="link-row" href="${esc(url)}" target="_blank" rel="noopener"><span class="link-text"><span class="link-kind">${kind}</span><span class="link-url">${esc(url)}</span></span><span class="link-arrow" aria-hidden="true">&#8599;</span></a>${hint ? `<p class="link-hint">${esc(hint)}</p>` : ''}</div>`;
+}
+
+function pagesRowHtml(result, elapsed) {
+  if (result.pagesStatus === 'off') return '';
+  if (result.pagesStatus === 'built') return `<div id="pages-slot">${linkRow('GitHub Pages', result.pagesUrl)}</div>`;
+  const stuck = result.pagesStatus === 'timeout' || result.pagesStatus === 'errored';
+  return `<div id="pages-slot"><div class="link-block"><div class="link-row link-row-wait" id="pages-row"><span class="link-text"><span class="link-kind">GitHub Pages</span><span class="link-state" id="pages-state">${esc(pagesLine(result, elapsed))}</span></span><span class="link-pulse" aria-hidden="true"></span></div></div>${stuck && result.pagesUrl ? pagesButtons(result) : ''}</div>`;
+}
+
+function pagesButtons(result) {
+  return `<div class="pages-actions" id="pages-actions"><a class="btn-primary" id="open-site-btn" href="${esc(result.pagesUrl)}" target="_blank" rel="noopener">Open site</a><a class="btn-ghost" id="open-repo-btn" href="${esc(result.repoUrl)}" target="_blank" rel="noopener">Open repo</a></div>`;
+}
+
+function viewDone(result, opened, elapsed) {
   const live = result.pagesStatus === 'built' && result.pagesUrl;
   const count = app.plan.files.length;
-  const linkRow = (kind, url) =>
-    `<a class="link-row" href="${esc(url)}" target="_blank" rel="noopener"><span class="link-text"><span class="link-kind">${kind}</span><span class="link-url">${esc(url)}</span></span><span class="link-arrow" aria-hidden="true">&#8599;</span></a>`;
-  return `<div class="done"><div class="done-head"><div class="done-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div><div><p class="done-title">${live ? 'It is live.' : 'Repo created.'}</p><p class="done-sub">${count} ${count === 1 ? 'file' : 'files'} &middot; one commit &middot; ${esc(result.owner)}/${esc(result.name)}</p></div></div>${note ? `<p class="done-note">${esc(note)}</p>` : ''}<div class="links">${live ? linkRow('Live site', result.pagesUrl) : ''}${linkRow('Repository', result.repoUrl)}</div><div class="done-actions">${opened ? '' : `<a class="btn-primary btn-primary-big" id="open-btn" href="${esc(targetUrl)}" target="_blank" rel="noopener">Open ${live ? 'site' : 'repo'}</a>`}<button type="button" class="${opened ? 'btn-primary' : 'btn-ghost'}" id="again-btn" data-act="drop-another">Drop another</button></div></div>`;
+  const first = result.preview ? result.preview.url : result.pagesUrl || result.repoUrl;
+  const firstKind = result.preview ? 'preview' : result.pagesUrl ? 'site' : 'repo';
+  const note = result.pagesStatus === 'failed' ? pagesLine(result, elapsed) : '';
+  return `<div class="done"><div class="done-head"><div class="done-mark" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div><div><p class="done-title" id="done-title">${live ? 'It is live.' : 'Repo created.'}</p><p class="done-sub">${count} ${count === 1 ? 'file' : 'files'} &middot; one commit &middot; ${esc(result.owner)}/${esc(result.name)}</p></div></div>${note ? `<p class="done-note">${esc(note)}</p>` : ''}<div class="links">${result.preview ? linkRow('Preview', result.preview.url, HINT) : ''}${result.pagesStatus === 'failed' ? '' : pagesRowHtml(result, elapsed)}${linkRow('Repository', result.repoUrl)}</div><div class="done-actions">${opened ? '' : `<a class="btn-primary btn-primary-big" id="open-btn" href="${esc(first)}" target="_blank" rel="noopener">Open ${firstKind}</a>`}<button type="button" class="${opened ? 'btn-primary' : 'btn-ghost'}" id="again-btn" data-act="drop-another">Drop another</button></div></div>`;
 }
 
 function viewProblem(title, text, actions) {
@@ -416,6 +449,7 @@ function startUpload() {
     tab = null;
   }
   app.busy = true;
+  app.runId += 1;
   app.name = name;
   app.popup = tab;
   app.tabReady = false;
@@ -426,53 +460,119 @@ function startUpload() {
 async function runUpload(name) {
   await morph(viewProgress(name), 'progress');
   setProgress(...STAGES.repo);
+  const runId = app.runId;
+  let opened = false;
   try {
     const result = await uploadProject({
       client: app.client,
       name,
       files: app.plan.files,
       pages: app.pages,
+      deferPages: true,
+      pollMs: timing.pollMs,
       onStage: (stage) => {
         if (STAGES[stage]) setProgress(...STAGES[stage]);
       },
       onProgress: (done, total) => {
         setProgress('Uploading files', `${done} of ${total} files`, 8 + (done / Math.max(1, total)) * 70);
       },
-      onPagesTick: (elapsed, limit) => {
-        setProgress('Publishing to GitHub Pages', `Building the site, ${Math.round(elapsed / 1000)} s`, 93 + (elapsed / limit) * 6);
+      onPreview: ({ preview, repoUrl }) => {
+        const tab = app.popup;
+        app.popup = null;
+        if (!tab || tab.closed) return;
+        try {
+          tab.location.href = preview ? preview.url : repoUrl;
+          opened = true;
+        } catch (err) {
+          opened = false;
+        }
       }
     });
-    await finish(result);
+    await finish(result, opened, runId);
   } catch (err) {
     fail(err);
   }
 }
 
-async function finish(result) {
+function paintPages(result, startedAt) {
+  const state = $('#pages-state');
+  if (state) state.textContent = pagesLine(result, Date.now() - startedAt);
+}
+
+async function swapLive(result, runId) {
+  if (app.runId !== runId || app.view !== 'done') return;
+  const slot = $('#pages-slot');
+  const title = $('#done-title');
+  if (title) title.textContent = 'It is live.';
+  if (slot) {
+    slot.classList.add('swap');
+    await wait(reduced() ? 0 : 180);
+    if (app.runId !== runId) return;
+    slot.innerHTML = linkRow('GitHub Pages', result.pagesUrl);
+    slot.classList.remove('swap');
+  }
+}
+
+async function watchPages(result, runId, startedAt) {
+  const alive = () => app.runId === runId;
+  const set = (status) => {
+    if (result.pagesStatus === status) return;
+    result.pagesStatus = status;
+  };
+  let status = await waitForPages(app.client, result.owner, result.name, {
+    intervalMs: timing.pollMs || 3000,
+    timeoutMs: timing.timeoutMs,
+    cancelled: () => !alive(),
+    onTick: (elapsed, limit, phase) => {
+      if (!alive()) return;
+      set(phase === 'built' ? 'built' : phase);
+      paintPages(result, startedAt);
+    }
+  }).catch((err) => (err && err.status === 401 ? 'cancelled' : 'timeout'));
+  if (!alive() || status === 'cancelled') return;
+  if (status === 'built') return swapLive(result, runId);
+  set(status);
+  const showStuck = () => {
+    const slot = $('#pages-slot');
+    if (slot && !$('#pages-actions') && result.pagesUrl) slot.insertAdjacentHTML('beforeend', pagesButtons(result));
+    paintPages(result, startedAt);
+  };
+  showStuck();
+  while (alive()) {
+    await wait(HOLD_MS);
+    if (!alive()) return;
+    let phase = 'queued';
+    try {
+      phase = await checkPages(app.client, result.owner, result.name);
+    } catch (err) {
+      phase = status;
+    }
+    if (!alive()) return;
+    if (phase === 'built') {
+      result.pagesStatus = 'built';
+      return swapLive(result, runId);
+    }
+    result.pagesStatus = phase === 'errored' ? 'errored' : 'timeout';
+    paintPages(result, startedAt);
+  }
+}
+
+async function finish(result, opened, runId) {
   setProgress('Done', 'Opening the result', 100);
   await wait(reduced() ? 0 : 520);
-  const live = result.pagesStatus === 'built' && result.pagesUrl;
-  const target = live ? result.pagesUrl : result.repoUrl;
-  let note = '';
-  if (result.pagesStatus === 'timeout') note = `Pages is still building. Your site will appear at ${result.pagesUrl} in a minute or two.`;
-  if (result.pagesStatus === 'errored') note = 'GitHub Pages reported a build error. Check the Pages settings of the repo.';
-  if (result.pagesStatus === 'failed') note = `Pages could not be switched on: ${result.pagesError}`;
-  let opened = false;
-  const tab = app.popup;
-  if (tab && !tab.closed) {
-    try {
-      tab.location.href = target;
-      opened = true;
-    } catch (err) {
-      opened = false;
-    }
-  }
-  app.popup = null;
   app.busy = false;
-  await morph(viewDone(result, opened, target, note), 'done', () => {
+  const startedAt = Date.now();
+  await morph(viewDone(result, opened, 0), 'done', () => {
     const el = $('#open-btn') || $('#again-btn');
     if (el) el.focus({ preventScroll: true });
   });
+  if (result.pagesUrl && result.pagesStatus !== 'built' && result.pagesStatus !== 'failed') {
+    watchPages(result, runId, startedAt);
+    const tick = setInterval(() => {
+      if (app.runId !== runId || result.pagesStatus === 'built') return clearInterval(tick);
+      paintPages(result, startedAt);
+    }, 1000);
+  }
 }
 
 function fail(err) {
@@ -503,6 +603,7 @@ function expire() {
 }
 
 function showIdle() {
+  app.runId += 1;
   app.plan = null;
   app.taken = false;
   app.empty = false;

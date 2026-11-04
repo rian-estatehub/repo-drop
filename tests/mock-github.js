@@ -11,11 +11,12 @@ const CORS = {
 const AVATAR =
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f3e3c8"/><stop offset="1" stop-color="#8a7556"/></linearGradient></defs><rect width="64" height="64" fill="url(#g)"/><circle cx="32" cy="25" r="11" fill="#1b1712"/><path d="M10 64c2-14 12-22 22-22s20 8 22 22Z" fill="#1b1712"/></svg>';
 
-export async function startMock({ login = 'testuser', taken = [], buildsBeforeBuilt = 1, failPages = false } = {}) {
+export async function startMock({ login = 'testuser', taken = [], buildsBeforeBuilt = 1, failPages = false, stallQueued = false } = {}) {
   const calls = [];
+  const commits = [];
   const repos = new Set(taken.map((n) => n.toLowerCase()));
   const blobs = new Map();
-  const state = { builds: 0 };
+  const state = { builds: 0, stall: stallQueued, run: { status: 'queued', conclusion: null } };
   let origin = '';
 
   const sha = (text) => createHash('sha1').update(text).digest('hex');
@@ -106,7 +107,9 @@ export async function startMock({ login = 'testuser', taken = [], buildsBeforeBu
 
       m = path.match(/^\/repos\/([^/]+)\/([^/]+)\/git\/commits$/);
       if (req.method === 'POST' && m) {
-        return json(201, { sha: sha(JSON.stringify(body)) });
+        const commitSha = sha(JSON.stringify(body));
+        commits.push(commitSha);
+        return json(201, { sha: commitSha });
       }
 
       m = path.match(/^\/repos\/([^/]+)\/([^/]+)\/git\/refs\/heads\/([^/]+)$/);
@@ -123,7 +126,14 @@ export async function startMock({ login = 'testuser', taken = [], buildsBeforeBu
       m = path.match(/^\/repos\/([^/]+)\/([^/]+)\/pages\/builds\/latest$/);
       if (req.method === 'GET' && m) {
         state.builds += 1;
+        if (state.stall) return json(404, { message: 'Not Found' });
         return json(200, { status: state.builds > buildsBeforeBuilt ? 'built' : 'building' });
+      }
+
+      m = path.match(/^\/repos\/([^/]+)\/([^/]+)\/actions\/runs$/);
+      if (req.method === 'GET' && m) {
+        if (!state.stall) return json(200, { total_count: 0, workflow_runs: [] });
+        return json(200, { total_count: 1, workflow_runs: [{ name: 'pages build and deployment', status: state.run.status, conclusion: state.run.conclusion }] });
       }
 
       json(404, { message: 'Not Found' });
@@ -138,8 +148,15 @@ export async function startMock({ login = 'testuser', taken = [], buildsBeforeBu
     port,
     origin,
     calls,
+    commits,
     login,
     blobs,
+    setRun: (status, conclusion = null) => {
+      state.run = { status, conclusion };
+    },
+    release: () => {
+      state.stall = false;
+    },
     close: () => new Promise((resolve) => server.close(resolve)),
     callsTo: (method, pattern) => calls.filter((c) => c.method === method && pattern.test(c.path))
   };

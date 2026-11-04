@@ -44,7 +44,7 @@ The card sits in the center of the viewport. On phone width the icon moves above
 3. `POST /git/trees` with no base tree, every path mode `100644`.
 4. `POST /git/commits` with no parents, message `Initial upload`.
 5. `PATCH /git/refs/heads/main` with `force: true`, so the repo holds exactly one commit and no auto README.
-6. Pages on: `POST /repos/{o}/{r}/pages` with source `main` and path `/`. Poll `GET /repos/{o}/{r}/pages/builds/latest` every 3 s until `built` (give up at 3 minutes and open the repo with a note).
+6. Pages on: `POST /repos/{o}/{r}/pages` with source `main` and path `/`. Poll `GET /repos/{o}/{r}/pages/builds/latest` and `GET /repos/{o}/{r}/actions/runs?per_page=1` every 3 s until `built` or an Actions run with conclusion success (10 minute wait, then keep checking every 10 s while the main tab is open). The new tab never waits on Pages: right after the ref update it opens `https://rawcdn.githack.com/{o}/{r}/{commitSha}/{htmlPath}` (index.html at the root, else the shortest .html path), or the repo when there is no HTML. The result card shows Preview, GitHub Pages (queued, building, live) and Repository.
 
 ## Files
 

@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { createClient, resolveBase, waitForPages, pool, uploadProject, DEFAULT_BASE } from '../lib/github.js';
+import { createClient, resolveBase, resolveTiming, previewPath, previewUrl, waitForPages, pool, uploadProject, DEFAULT_BASE } from '../lib/github.js';
 
 const reply = (status, data, headers = {}) => ({
   ok: status >= 200 && status < 300,
@@ -25,6 +25,40 @@ describe('resolveBase', () => {
   });
   test('defaults to api.github.com', () => {
     assert.equal(resolveBase({ hostname: 'localhost', search: '' }), 'https://api.github.com');
+  });
+});
+
+describe('resolveTiming', () => {
+  test('reads pollMs, timeoutMs and holdMs on localhost only', () => {
+    assert.deepEqual(resolveTiming({ hostname: 'localhost', search: '?pollMs=40&timeoutMs=900&holdMs=60' }), { pollMs: 40, timeoutMs: 900, holdMs: 60 });
+    assert.deepEqual(resolveTiming({ hostname: 'repo-drop.vercel.app', search: '?pollMs=40' }), {});
+    assert.deepEqual(resolveTiming({ hostname: '127.0.0.1', search: '?pollMs=-1&timeoutMs=x' }), {});
+  });
+});
+
+describe('preview', () => {
+  test('index.html at the root wins, else the shortest html path, else none', () => {
+    assert.equal(previewPath(['a/index.html', 'index.html', 'x.html']), 'index.html');
+    assert.equal(previewPath(['docs/deep/page.html', 'about.html', 'z/a.html']), 'z/a.html');
+    assert.equal(previewPath(['b.html', 'a.html']), 'a.html');
+    assert.equal(previewPath(['style.css', 'app.js']), null);
+    assert.equal(previewPath([]), null);
+  });
+  test('previewUrl builds the githack address from the commit sha', () => {
+    assert.equal(previewUrl('u', 'r', 'abc123', 'index.html'), 'https://rawcdn.githack.com/u/r/abc123/index.html');
+    assert.equal(previewUrl('u', 'r', 'abc123', 'my docs/a b.html'), 'https://rawcdn.githack.com/u/r/abc123/my%20docs/a%20b.html');
+  });
+});
+
+describe('client runs', () => {
+  test('latestRun reads the newest Actions run and tolerates 404', async () => {
+    const urls = [];
+    const answers = [reply(200, { workflow_runs: [{ status: 'queued', conclusion: null, id: 9 }] }), reply(404, { message: 'Not Found' }), reply(200, { workflow_runs: [] })];
+    const client = createClient({ token: 't', base: 'http://x', fetchImpl: async (url) => (urls.push(url), answers.shift()) });
+    assert.deepEqual(await client.latestRun('o', 'r'), { status: 'queued', conclusion: null });
+    assert.equal(await client.latestRun('o', 'r'), null);
+    assert.equal(await client.latestRun('o', 'r'), null);
+    assert.equal(urls[0], 'http://x/repos/o/r/actions/runs?per_page=1');
   });
 });
 
@@ -131,11 +165,40 @@ describe('pool and pages polling', () => {
     assert.deepEqual(ticks, [3000, 6000, 9000]);
   });
 
-  test('waitForPages gives up at 3 minutes', async () => {
+  test('waitForPages gives up at 10 minutes', async () => {
     let polls = 0;
     const out = await waitForPages({ latestBuild: async () => (polls += 1, { status: 'building' }) }, 'o', 'r', { sleep: async () => {} });
     assert.equal(out, 'timeout');
-    assert.equal(polls, 60);
+    assert.equal(polls, 200);
+  });
+
+  test('waitForPages reports queued, building, then built from the Actions run', async () => {
+    const runs = [null, { status: 'queued', conclusion: null }, { status: 'waiting', conclusion: null }, { status: 'in_progress', conclusion: null }, { status: 'completed', conclusion: 'success' }];
+    const phases = [];
+    const out = await waitForPages({ latestBuild: async () => null, latestRun: async () => runs.shift() }, 'o', 'r', {
+      sleep: async () => {},
+      onTick: (t, limit, phase) => phases.push(phase)
+    });
+    assert.equal(out, 'built');
+    assert.deepEqual(phases, ['queued', 'queued', 'queued', 'building', 'built']);
+  });
+
+  test('waitForPages stays queued past the timeout when the run never starts', async () => {
+    const phases = [];
+    const out = await waitForPages({ latestBuild: async () => null, latestRun: async () => ({ status: 'queued', conclusion: null }) }, 'o', 'r', {
+      sleep: async () => {},
+      intervalMs: 100,
+      timeoutMs: 500,
+      onTick: (t, limit, phase) => phases.push(phase)
+    });
+    assert.equal(out, 'timeout');
+    assert.deepEqual(phases, ['queued', 'queued', 'queued', 'queued', 'queued']);
+  });
+
+  test('waitForPages keeps going when the runs call fails', async () => {
+    const states = [{ status: 'building' }, { status: 'built' }];
+    const out = await waitForPages({ latestBuild: async () => states.shift(), latestRun: async () => { throw new Error('boom'); } }, 'o', 'r', { sleep: async () => {} });
+    assert.equal(out, 'built');
   });
 
   test('waitForPages reports an errored build', async () => {
@@ -164,6 +227,34 @@ describe('uploadProject', () => {
     assert.ok(log.some((l) => l[0] === 'pages'));
     assert.equal(out.pagesStatus, 'built');
     assert.equal(out.pagesUrl, 'https://u.github.io/x/');
+  });
+
+  test('onPreview fires right after the ref and before pages, with the commit sha and html path', async () => {
+    const log = [];
+    const client = makeClient(log);
+    const out = await uploadProject({
+      client, name: 'x', files, pages: true, deferPages: true,
+      onPreview: ({ preview, repoUrl }) => log.push(['preview', preview.url, repoUrl])
+    });
+    const kinds = log.map((l) => l[0]);
+    assert.ok(kinds.indexOf('ref') < kinds.indexOf('preview'));
+    assert.ok(kinds.indexOf('preview') < kinds.indexOf('pages'));
+    assert.deepEqual(log.find((l) => l[0] === 'preview').slice(1), ['https://rawcdn.githack.com/u/x/c1/index.html', 'https://github.com/u/x']);
+    assert.equal(out.pagesStatus, 'queued');
+    assert.equal(out.preview.path, 'index.html');
+  });
+
+  test('no html means no preview and the repo url is handed over', async () => {
+    const seen = [];
+    const out = await uploadProject({ client: makeClient([]), name: 'x', files: [{ path: 'a.css', size: 1, read: async () => new Blob(['a']) }], pages: false, onPreview: (p) => seen.push(p) });
+    assert.equal(out.preview, null);
+    assert.deepEqual(seen, [{ preview: null, repoUrl: 'https://github.com/u/x' }]);
+  });
+
+  test('waitForPages stops when cancelled', async () => {
+    let polls = 0;
+    const out = await waitForPages({ latestBuild: async () => (polls += 1, null) }, 'o', 'r', { sleep: async () => {}, cancelled: () => polls >= 2 });
+    assert.equal(out, 'cancelled');
   });
 
   test('pages off adds nothing and never calls pages', async () => {
